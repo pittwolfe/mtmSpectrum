@@ -6,11 +6,12 @@
 """
 
 __author__ = 'cwolfe'
-from numpy import *
+
+import numpy as np
 import numpy.matrixlib as ma
 import scipy as sp
 
-class MTMSpectrum:
+class MTMSpectrum(object):
     """
     Class implementing Thompson's multi-taper method with line detection, reshaping, and 
     reconstruction
@@ -27,223 +28,442 @@ class MTMSpectrum:
     K : int
         number of tapers to use
     """
-#    global np
     
-    def __init__(self, data, nw, K, t0=0, fs=None, dt=None, nfft=None, adaptTol=None, adaptMaxIts=20,
-                 useEffectiveDOF=True):
+    def __init__(self, data, time_bandwidth=None, t0=0, dt=None, fs=None, number_of_tapers=None, 
+                 nfft=None, adaptTol=None, adaptMaxIts=1000, useEffectiveDOF=True, calcSpectrum=True):
 
-        self.data = data.squeeze()
-        self.nw = nw
-        self.K = K
-        self.useEffectiveDOF = useEffectiveDOF
-        self.Hk = None
-        self.S_noiseModel = None
-        self.t0 = t0
-
-        self.dpss = None
-        self.lk = None
-        self.f = None
-        self.Nfreq = None
-        self.df = None
-        self.fn = None
-        self.fr = None
-        self.Jk = None
-        self.Sk = None
-        self.S_noise = None
-        self.dof = None
-        self.S = None
-        self.bk = None
-        self.fitType = None
-        self.noiseCoef = None
-        self.S_smoothed = None
-        self.S_noiseModel = None
-
-        self.confidenceValue = None
-        self.confidenceInterval = None
-        self.confidenceLimit = None
-
-        self.S_line = None
-        self.Fstat = None
-        self.lines = None
-        self.fLines = None
-
-        self.removedLines = None
-        self.fRemovedLines = None
-
-        # import ipdb; ipdb.set_trace()
-
-        if fs is None:
-            if dt is not None:
-                self.dt = float(dt)
-                self.fs = 1 / self.dt
-            else:
-                self.dt = 1.
-                self.fs = 1.
+        from .util import dpss
+        
+        if isinstance(data, MTMSpectrum):
+            obj = data
+            
+            self.data               = obj.data
+            self.xvar               = obj.xvar
+            self.time_bandwidth     = obj.time_bandwidth
+            self.number_of_tapers   = obj.number_of_tapers
+            self.useEffectiveDOF    = obj.useEffectiveDOF
+            self.fs                 = obj.fs
+            self.dt                 = obj.dt
+            self.N                  = obj.N
+            self.nfft               = obj.nfft
+            self.adaptTol           = obj.adaptTol
+            self.adaptMaxIts        = obj.adaptMaxIts
+            self.fr                 = obj.fr
+            self.fn                 = obj.fn
+            self.Nfreq              = obj.Nfreq
+            self.df                 = obj.df
+            self.freq               = obj.freq
+            self.dpss               = obj.dpss
+            self.dpss_concentration = obj.dpss_concentration
+            self.spec               = obj.spec
+            self.edof               = obj.edof
+            self.eigenFT            = obj.eigenFT
+            self.weights            = obj.weights
         else:
-            if dt is None:
-                self.fs = float(fs)
-                self.dt = 1 / self.fs
+                    
+            self.data = data.squeeze()
+            self.xvar = data.var(ddof=1) # variance of original data
+        
+            self.time_bandwidth = time_bandwidth
+            self.useEffectiveDOF = useEffectiveDOF
+        
+            if number_of_tapers is None:
+                self.number_of_tapers = np.ceil(2*time_bandwidth) - 1
             else:
-                raise ValueError("Can't specify both fs and dt")
+                self.number_of_tapers = number_of_tapers
 
-        self.N = self.data.size
+            if fs is None:
+                if dt is not None:
+                    self.dt = float(dt)
+                    self.fs = 1 / self.dt
+                else:
+                    self.dt = 1.
+                    self.fs = 1.
+            else:
+                if dt is None:
+                    self.fs = float(fs)
+                    self.dt = 1 / self.fs
+                else:
+                    raise ValueError("Can't specify both fs and dt")
+                
+                
+            self.N = self.data.size
 
-        if nfft is None:
-            self.nfft = int(2 ** (ceil(log2(self.N))))  # next power of two
-            if self.nfft < 1.5 * self.N: self.nfft *= 2
-        else:
-            self.nfft = nfft
+            if nfft is None:
+                self.nfft = int(2 ** (np.ceil(np.log2(self.N))))  # next power of two
+                if self.nfft < 1.5 * self.N: self.nfft *= 2
+            else:
+                self.nfft = nfft
+            
+            if adaptTol is None: 
+                self.adaptTol = 0.005 * self.xvar / self.nfft
+            else:
+                self.adaptTol = adaptTol
+            self.adaptMaxIts = adaptMaxIts
+        
+            self.t0 = t0
+                
+            self.fr    = 1/(self.N*dt) # Rayleight frequency
+            self.fn    = 1/(2*dt) # Nyquist frequency
+            self.Nfreq = self.nfft//2 + 1
+            self.df    = 1/(self.nfft*dt)
+            self.freq  = np.arange(0, self.Nfreq)*self.df
+            
+            # DOF in the raw spectra
+            self.dof = np.ones(self.Nfreq)
+            if np.mod(self.nfft, 2) == 0:
+                self.dof[1:-1] = 2
+            else:
+                self.dof[1:] = 2
+        
+            dpss, self.dpss_concentration = dpss(self.N, self.time_bandwidth, self.number_of_tapers)
+            self.dpss = dpss.T
+        
+            self.calcSpectrum(self.adaptTol, self.adaptMaxIts)
+            
+    def copy(self):
+        """ return a shallow copy of self """
+        result = MTMSpectrum(self)
+        
+        return result
+        
 
-        # finished with setup, calculate the spectrum
-        self.calcSpectrum(adaptTol, adaptMaxIts)
-
-    def calcSpectrum(self, tol=None, MaxIts=20):
+    def calcSpectrum(self, tol=None, MaxIts=None):
         """ 
         Calculate the spectrum.
         
-        Tapers are optimally combined using adaptive weighting. See :func:`adaptWeights`
-        for an explanation of input variables.
-        
         Called automatically on construction.        
-        """
-        from nitime.algorithms.spectral import dpss_windows
-
-        self.dpss, lam = dpss_windows(self.N, self.nw, self.K)
-        self.lk = lam[:, newaxis]
-
-        self.f = fft.rfftfreq(self.nfft, d=self.dt)
-        self.Nfreq = self.f.size
-        self.df = self.f[1] - self.f[0]
-        self.fn = self.f[-1]
-        self.fr = self.fs / self.N
-
-        self.Jk = fft.rfft(self.dpss * self.data, self.nfft, 1)
-        self.Sk = abs(self.Jk) ** 2
-
-        self.adaptWeights(tol, MaxIts)
-        self.S_noise = self.S.copy()
-
-    def adaptWeights(self, tol=None, MaxIts=20):
-        """ 
-        Perform the adaptive weighting.
         
-        Parameters
-        ----------
-        tol : float, optional
-            Stopping criterion for adaptive weighting iteration. If `None` defaults to
-            0.005 times the signal variance divided by the FFT length.
-        MaxIts : int, optional
-            Maximum number of iterations to perform before quiting.
+        This method estimates the adaptive weighted multitaper spectrum, as in
+        Thomson 1982.  This is done by estimating the DPSS (discrete prolate
+        spheroidal sequences), multiplying each of the tapers with the data series,
+        take the FFT, and using the adaptive scheme for a better estimation.
+
+        The spectrum is
+            $$S(f) = \frac{\sum_{k=0}^{K-1} b_k^2(f) \mu_k |Y_k(f)|^2}{\sum_{k=0}^{K-1} b_k^2(f) \mu_k},$$
+        where the $Y_k(f)$ are the eigen-FTs,
+            $$Y_k(f) = \sum_{n=0}^{N-1} w_k(t_n) X(t_n) \mathrm{e}^{-2\pi i f t_n},$$
+        $t_n = n\Delta t$ for $n = 0, \dots, N-1$, $w_k$ is the $k^\text{th}$ DPSS, 
+        and $\mu_k$ is the $k^\text{th}$ DPSS concentration. The weights $b_k$ are 
+        determined by the adaptive weighting proceedure implemented in `adaptspec`.
+
+        :param data: :class:`numpy.ndarray`
+             Array with the data.
+        :param dt: float
+             Sample spacing of the data.
+        :param time_bandwidth: float
+             Time-bandwidth product. Common values are 2, 3, 4 and numbers in
+             between.
+        :param nfft: int
+             Number of points for fft. If nfft == None, no zero padding
+             will be applied before the fft
+        :param number_of_tapers: integer, optional
+             Number of tapers to use. Defaults to int(2*time_bandwidth) - 1. This
+             is maximum senseful amount. More tapers will have no great influence
+             on the final spectrum but increase the calculation time. Use fewer
+             tapers for a faster calculation.
+        :param adaptive: bool, optional
+             Whether to use adaptive or constant weighting of the eigenspectra.
+             Defaults to True(adaptive).
+         
+        :return spec: :class:`numpy.ndarray`
+            power spectrum estimate
+        :return freq: :class:`numpy.ndarray`
+            frequencies
+        :return nu: :class:`numpy.ndarray`
+            effective degrees of freedom
+        :return yk: :class:`numpy.ndarray`
+            the eigenspectra
+        :return wk: :class:`numpy.ndarray`
+            The dpss
+        :return mu: :class:`numpy.ndarray`
+            The dpss concetrations
         """
         
-        import warnings
-        sig2 = self.data.var()  # power
+        x    = self.data
+        npts = self.N
+        nf   = self.Nfreq
+        nfft = self.nfft
+        wk   = self.dpss
+        mu   = self.dpss_concentration
+        df   = self.df
+        
+        self.eigenFT = np.fft.fft(x[:,np.newaxis]*wk, n=nfft, axis=0)  # eigen-FTs
+        sk = np.abs(self.eigenFT[:nf,:])**2 # eigenspectra
+        sbar = 2*np.mean(sk/mu[np.newaxis,:],axis=1) # mean spectrum
+    
+        self.adaptspec(self.adaptTol, self.adaptMaxIts)
 
-        Sk = self.Sk
-        lk = self.lk
+        # double the power in positive frequencies
+        self.spec *= self.dof
+    
+        # resscale to match original variance
+        sscal = np.sum(self.spec*df)
+        self.spec *= self.xvar/sscal
+        
 
-        if tol is None: tol = 0.005 * sig2 / self.nfft
+    def adaptspec(self, adaptTol=None, adaptMaxIts=None):
+        """
+        subroutine to calculate adaptively weighted power spectrum
 
-        S = (Sk[0, :] + Sk[1, :]) / 2  # initial esimate of spectrum
-        a = sig2 * (1 - lk)
+        The adaptive weights $b_k$ are defined by the iteration
+            $$b_k^{(n+1)}(f) = \frac{\sqrt{\mu_k} S^{(n)}(f)}{\mu_k S^{(n)}(f) + (1-\mu_k)\frac{1}{K}\sum_{k=0}^{K-1} \sigma_k^2},$$
+        where
+            $$S^{(n)}(f) = \frac{\sum_{k=0}^{K-1} b_k^{(n)2}(f) \mu_k |Y_k(f)|^2}{\sum_{k=0}^{K-1} b_k^{(n)2}(f) \mu_k},$$
+        and
+            $$\sigma_k^2 = \Delta f\sum_{m=0}^{\hat{N}-1} |Y_k(f_m)|^2,$$
+        The number of points used in the FFT is $\hat{N}$ ($\hat{N} \ge N$), $f_m = m \Delta f$ 
+        for $m = 0, \ldots, \hat{N}-1$, and $\Delta f = 1/(\hat{N}\Delta t)$. The starting value 
+        for the iteration is 
+            $$S^{(0)}(f) = \frac{|Y_0(f)|^2 + |Y_1(f)|^2}{2}$$
+        and the iteration continues until 
+            $$\max_f = \frac{|S^{(n+1)}(f) - S^{(n)}(f)|}{|S^{(n+1)}(f) + S^{(n)}(f)|} < \text{tol}.$$
+    
+            inputs:
 
-        for n in range(MaxIts):
-            b = S / (lk * S + a)
-            S1 = (lk * b ** 2 * Sk).sum(axis=0) / (lk * b ** 2).sum(axis=0)
+            mu    - DPSS concentrations
+            yk    - array containing kspec eigenFTs
 
-            if abs(S - S1).mean() < tol: break
+        outputs:
 
-            Stemp = S1  # swap S and S1
-            S1 = S
-            S = Stemp
-        else:
-            warnings.warn('Adaptive weight iteration did not converge')
+            spec - vector containing adaptively weighted spectrum
+            nu   - vector containing the number of degrees of freedom
+               for the spectral estimate at each frequency.
+            bk   - array containing the ne weights for kspec 
+                  eigenspectra normalized so that if there is no bias, the
+               weights are unity.
+        """
 
-        # effective degrees of freedom
-        if self.useEffectiveDOF:
-            self.dof = 2 * sum(b ** 2 * lk, axis=0) ** 2 / sum(b ** 4 * lk ** 2, axis=0)
-        else:
-            self.dof = tile(2 * self.K, (self.Nfreq))
+        if adaptTol is None:
+            adaptTol = self.adaptTol
+        if adaptMaxIts is None:
+            adaptMaxIts = self.adaptMaxIts
 
-        self.S = S
-        self.bk = b
-
-    def ar1(self, f, sig2, r):
+        mu    = self.dpss_concentration
+        yk    = self.eigenFT
+        nfft  = self.nfft
+        kspec = self.number_of_tapers
+        ne    = self.Nfreq
+        Nfreq = self.Nfreq
+        df    = self.df
+    
+        sk = self.dof[:,np.newaxis]*np.abs(self.eigenFT[:Nfreq,:])**2
+    
+        dvar = np.mean(np.sum(sk,axis=0)*df)        
+        Bk = ((1 - mu) * dvar)[np.newaxis,:]
+        
+        sqev = np.sqrt(mu)[np.newaxis,:]
+    
+        cerr = 1 # current error
+#         rerr = 9.5e-7 # a magical mystery number
+        rerr = adaptTol
+    
+        # begin iterations
+        j = 0
+        spec = np.mean(sk[:,:2], axis=1, keepdims=True)
+    
+        while cerr > rerr:
+            j += 1
+            slast = spec
+        
+            bk = sqev*spec/(mu[np.newaxis,:]*spec + Bk)
+            bk[bk > 1] = 1
+        
+            spec = np.sum(bk**2*sk, axis=1, keepdims=True)/np.sum(bk**2, axis=1, keepdims=True)
+        
+            if j >= adaptMaxIts:
+                warnings.warn('adaptive iteration did not converge')
+                break
+            
+            cerr = np.amax(np.abs((spec - slast)/(spec + slast)))
+        
+#         from IPython.core.debugger import Tracer
+#         Tracer()()
+        bk_dofs = bk/(np.sqrt(np.mean(bk**2, axis=1, keepdims=True)))
+        bk_dofs[bk_dofs > 1] = 1
+    
+        nu = self.dof*np.sum(bk_dofs**2, axis=1)
+    
+        self.spec = spec.squeeze()
+        self.edof = nu
+        self.weights = bk    
+    
+    def ar1_spec(self, f, r):
         r"""
         The spectrum of an AR(1) process.
         
+        We will try to fit the smoothed spectrum to a AR(1) process that has the spectrum 
+            $$S(f) = \frac{\sigma^2}{1 - 2r \cos \pi f/f_\text{N} + r^2},$$
+        where $r$ is the lag-one autocorrelation and $\sigma^2$ is the noise variance. 
+        The average power in this spectrum is
+            $$S_0 = \frac{\sigma^2}{1-r^2},$$
+        so we can equivalently write the spectrum as
+            $$S(f) = S_0\frac{1-r^2}{1 - 2r \cos \pi f/f_\text{N} + r^2},$$
+    
         Notes
         -----
-        The spectrum of an AR(1) process with variance :math:`\sigma^2` and lag-1 autocorrelation
+        The spectrum of an AR(1) process with variance and lag-1 autocorrelation
         :math:`r` is
         
         .. math::
-            S(f) = \sigma^2\frac{1 - r^2}{1 + r^2 - 2r\cos\pi f},
-            
-        where :math:`f` is normalized by the Nyquist frequency.
+            S(f) = S_0\frac{1 - r^2}{1 + r^2 - 2r\cos\pi f/f_n}
         """
-        return sig2 * (1 - r ** 2) / (1 + r ** 2 - 2 * r * cos(pi * f))
+        fn = self.fn
+        
+        return (1-r**2)/(1 - 2*r*np.cos(np.pi*f/fn) + r**2)/fn
 
-    def lorentzian(self, f, sig2, gamma):
-        r"""
+    def smoothed_ar1_spec(self, f, fn, r, S0, tau):
+        '''
+        AR(1) spectrum with Nyquist frequency fn, lag-one autocorrelation r, and total power S0,
+        smoothed by a Gaussian with e^2 folding scale of tau^2
+        '''
+    
+        y = np.exp(-2*np.pi**2*f**2*tau**2)*(1-r**2)/(1 - 2*r*np.cos(np.pi*f/fn) + r**2)/fn
+        y /= np.sum(y)
+    
+        return S0*y
+        
+    def lorentzian_spec(self, f, gamma, L0=1):
+        """
         A Lorentzian centered at zero
+        
+        The unit power Lorentzian is given by
+            $$L(f) = \frac{4\gamma}{\gamma^2 + (2\pi f)^2},$$
+        where $\gamma$ is the decorrelation time of the time series.        
         
         Notes
         -----
         The Lorentzian is given by
         
-        .. math::
-            L(f) = \frac{2}{\pi\gamma}\frac{\sigma^2}{1 + \frac{f^2}{\gamma^2}},
-            
-        where :math:`\gamma` and :math:`\sigma^2` are the decorrelation time and variance, respectively, of
-        the time series.
         """ 
-        return (2. / (pi * gamma)) * sig2 / (1 + f ** 2 / gamma ** 2)
+        return L0*4*gamma/(gamma**2 + (2*np.pi*f)**2)
 
-    def getConfidence(self, confidenceValue, smoothingWidth, fitType='ar1', fitRange=None):
+
+    def getSmoothedSpectrum(self, smoothingWidth, smoothing_range=None):
+        """
+        Smooth spectrum with a median filter
+        """
+        
+        f  = self.freq
+        df = self.df
+        
+        spec_smooth = self.copy()
+                                  
+        spec_smooth.spec = np.full_like(self.spec, np.nan)
+        if smoothing_range is None:
+            idx = f <= self.fn
+        else:
+            idx = np.logical_and(f >= smoothing_range[0], f <= smoothing_range[1])
+            
+        # find the width in terms of bins, ensuring it is an odd integer
+        w = 2*int((smoothingWidth/df)//2) + 1
+        width = (w-1)//2
+        spec_smooth.spec[idx] = medianSmooth(self.spec[idx], width)
+        
+        return spec_smooth
+        
+    
+    def getFit(self, fitRange=None):
+        """ Get a fit to an AR(1) spectrum """
+        
+        from scipy.optimize import curve_fit
+                
+        if fitRange is None:
+            idx = self.freq <= self.fn
+        else:
+            idx = np.logical_and(self.freq >= fitRange[0], self.freq <= fitRange[1])
+        
+        # fit an AR(1) process to it
+        popt, _ = curve_fit(lambda f, r, S0: S0*self.ar1_spec(f, r), 
+                            self.freq[idx], self.spec[idx], p0=[.5, 1])
+        r_opt, S_opt = popt
+        print('optimal parameters: r = {:f}, S_0 = {:f}'.format(r_opt, S_opt))
+        
+        noise = self.copy()
+        noise.spec = S_opt*self.ar1_spec(self.freq, r_opt)
+        
+        return noise
+
+    def getConfidenceInterval(self, confidenceValue):
         """
         Get confidence intervals.
         
-        Confidence intervals are based on a noise model. The noise model is a fit in 
-        spectral space to a median smoothed version of the noise spectrum.
+        Confidence intervals: the ratio the estimated spectrum to the true spectrum is 
+        distributed like $\chi^2_{\nu}/\nu$ where $\nu$ is the effective degrees of freedom.
         """
-        from scipy.optimize import curve_fit
+        from scipy.stats import chi2
+        
+        nu = self.edof
+        
+        conf_int = self.copy()
+        conf_int.spec = self.spec*chi2.ppf((1+confidenceValue)/2, nu)/chi2.ppf(.5, nu)
+
+        return conf_int
+
+    def getConfidence(self, noise_model):
+        """
+        Get confidence value for each estimate.        
+        """
         from scipy.stats import chi2
 
-        f = self.f
-        S = self.S_noise
-        dof = self.dof
+        freq = self.freq
+        spec = self.spec
+        dof  = self.edof
 
-        if smoothingWidth is None:
-            raise ValueError('Must specify smoothingWidth')
+        # confidence of each estimate
+        conf = 2*chi2.cdf(chi2.ppf(.5, dof)*self.spec/noise_model.spec,dof) - 1
+        conf[conf < 0] = 0
 
-        S_smoothed = medianSmooth(S, smoothingWidth)
+        return conf
 
-        if fitRange is None:
-            idx = f <= self.fn
-        else:
-            idx = logical_and(f >= fitRange[0], f <= fitRange[1])
 
-        Ssvar = S_smoothed[idx].sum() * self.df
+    def ftest(self):    # line testing
+        '''
+        Compute F-test for single spectral line components
+        at the frequency bins given by the mtspec routines. 
+    
+        From German Prieto.
+    
+        Line test for periodic components. Assume that the lines have the form
+            $$X(t) = B \mathrm{e}^{2\pi i f_0 t} + \eta(t),$$
+        where $\eta$ represents white noise. The estimate for the line amplitude is
+            $$\hat{B}(f_0) = \frac{\sum_{k=0}^{K-1} U_k(0) Y_k(f_0)}{\sum_{k = 0}^{K-1}U_k^2(0)},$$
+        where $U_k(f)$ are the FTs of the DPSSs $w_k(t)$.
 
-        if fitType == 'ar1':
-            self.fitType = 'ar1'
-            popt, pcov = curve_fit(self.ar1, f[idx] / self.fn, S_smoothed[idx], [Ssvar, .5])
-            S_noiseModel = self.ar1(f / self.fn, popt[0], popt[1])
-        elif fitType == 'lorentzian':
-            self.fitType = 'lorentzian'
-            popt, pcov = curve_fit(self.lorentzian, f[idx], S_smoothed[idx], [Ssvar, .05])
-            S_noiseModel = self.lorentzian(f, popt[0], popt[1])
-        else:
-            raise ValueError('Unknown fitType: possible values are "ar1" and "lorentzian"')
+        The variance explained by the line is
+            $$\theta = |\hat{B}(f_0)|^2 \sum_{k=0}^{K-1}U_k^2(0)$$
+        and the remaining variance is
+            $$\psi = \sum_{k=0}^{K-1}\left| Y_k(f_0) - \hat{B}(f_0)U_k(0)\right|^2.$$
+        The test statistic 
+            $$F(f) = (K-1)\frac{\theta}{\psi}$$
+        obeys a Fisher-Snedecor law with 2 and $2(K-1)$ degrees of freedom.
+    
+        :return F: :class:`numpy.ndarray`
+            vector of f-test values
+        :return p: :class:`numpy.ndarray`
+            vector of percentiles
+        '''
+        from scipy.stats import f as fdist
+    
+        nfft  = self.nfft
+        kspec = self.number_of_tapers
+        nf    = self.Nfreq
+        yk    = self.eigenFT
+    
+        Uk0 = self.dpss.sum(axis=0)
+    
+        # mean amplitude of line components at each frequency
+        B = np.sum(Uk0[np.newaxis,:]*yk[:nf,:],axis=1)/np.sum(Uk0**2)
+    
+        # F test
+        #   numerator: model variance
+        #   denominator: misfit
+        fstat = (((kspec-1) * np.abs(B)**2 * sum(Uk0**2)) / 
+            np.sum(np.abs(yk[:nf,:] - B[:,np.newaxis]*Uk0[np.newaxis,:])**2, axis=1))
+    
+        pval = fdist.cdf(fstat, 2, 2*(kspec-1))
 
-        self.noiseCoef = popt
-        self.S_smoothed = S_smoothed
-        self.S_noiseModel = S_noiseModel
-
-        self.confidenceValue = confidenceValue
-        self.confidenceInterval = dof / chi2.ppf((1 - confidenceValue) / 2, dof)
-        self.confidenceLimit = self.confidenceInterval * S_noiseModel
+        return pval, fstat
 
     def findLines(self, chiTestCutoff, fTestCutoff, smoothingWidth=None, fitType='ar1', fitRange=None):
         r"""
@@ -295,16 +515,17 @@ class MTMSpectrum:
         nfft = self.nfft
         S_noiseModel = self.S_noiseModel
 
-        if self.Hk is None: self.Hk = fft.rfft(h, nfft, 1)
+        if self.Hk is None: self.Hk = np.fft.rfft(h, nfft, 1)
         Hk = self.Hk
 
-        Hk0 = real(Hk[:, 0][:, newaxis])
-        Cl = (sum(Jk * Hk0, axis=0) / sum(Hk0 ** 2))[newaxis, :]
+        Hk0 = np.real(Hk[:, 0][:, newaxis])
+        Cl = (np.sum(Jk * Hk0, axis=0) / np.sum(Hk0 ** 2))[newaxis, :]
 
-        F = squeeze((K - 1) * abs(Cl) ** 2 * sum(Hk0 ** 2) / sum(abs(Jk - Hk0 * Cl) ** 2, axis=0))
+        F = (np.squeeze((K - 1) * np.abs(Cl) ** 2 * np.sum(Hk0 ** 2) 
+                / np.sum(abs(Jk - Hk0 * Cl) ** 2, axis=0)))
 
-        lines = nonzero(
-            logical_and(
+        lines = np.nonzero(
+            np.logical_and(
                 S > dof / chi2.ppf((1 - chiTestCutoff) / 2, dof) * S_noiseModel,
                 F > fdist.ppf(fTestCutoff, 2, 2 * K - 2)))[0]
 
@@ -313,50 +534,104 @@ class MTMSpectrum:
         self.lines = lines
         self.fLines = self.f[lines]
 
-    def removeLines(self, linesToRemove, lineWidth=None):
+    def removeLines(self, linesToRemove):
         r"""
-        Remove given lines; reshape spectrum.
+        Reshape eigenft's around specified spectral lines.
+         
+        Line removal and reshaping:
+
+        The eigenFT of the line described above is
+            $$Y_k(f) = B U_k(f - f_0).$$
+        We remove this from the raw eigenFTs to get an estimate of the continuous spectrum.
+
+        The associated power is
+            $$\sum_{m=0}^{\hat{N}-1} |Y_k(f_m)|^2 = \hat{N} |B|^2,$$
+        which is independent of $k$. This power is put in a single frequency bin given by $f_m = f_0$.   
         
-        Parameters
-        ----------
-        linesToRemove : list of int
-            Indices of lines to remove.
-        lineWidth : int
-            Half-width of the reshaping area around the line (default is the smallest integer
-            greater than `nw`).
-            
-        Notes
-        -----
-        Near a line located at :math:`l = l_0`, the reshaped noise spectrum is
-        
-        .. math::
-            \hat{S}_l = \frac{1}{K}\sum_{k=0}^{K-1}|J_{kl} - \hat{C}_{l_0}H_{k,l-l0}|^2.
+        :param lines: list-like
+            list of lines to remove
+        :param wk: :class:`numpy.ndarray`
+            the dpss
+        :param yk: :class:`numpy.ndarra
+            the eigenspectra
+        :param mu: :class:`numpy.ndarray`
+            The dpss concetrations
+        :param nfft: int
+            Length of FFT. If None, assumes nfft is even and defaults to 2*(# of frequencies - 1)
+        :param xvar: float
+            Variance of original time series (for rescaling spectrum). Default: 1
+
+        :return spec_background: :class:`MTMSpectrum`
+            background spectrum: original spectrum with the lines removed
+        :return spec_lines: :class:`MTMSpectrum`
+            the line spectrum
+        :return line_power: :class:`MTMSpectrum`
+            the power in each line
         """
-        #    import ipdb; ipdb.set_trace()
-        S = self.S
-        Hk = self.Hk
-        Jk = self.Jk
-        nw = self.nw
-        Cl = self.S_line
+        background = self.copy()
+        lines      = self.copy()
+        line_power = self.copy()
+    
+        background.eigenFT = background.eigenFT.copy()
+        lines.eigenFT      = np.zeros_like(background.eigenFT)
+        line_power.eigenFT = np.zeros_like(background.eigenFT)
+            
+        background.spec = background.spec.copy()
+        lines.spec      = np.zeros_like(background.spec)
+        line_power.spec = np.zeros_like(background.spec)
+            
+        npts  = self.N
+        nfft  = self.nfft
+        kspec = self.number_of_tapers
+        nf    = self.Nfreq    
+        fnyq  = self.fn
+        df    = self.df
+        wk    = self.dpss    
+        
+        if len(linesToRemove) == 0:
+            return background, lines, line_power
+    
+        # calculate the mean amplitude of line components at line frequencies
+        Uk0 = wk.sum(axis=0)
+        B = np.sum(Uk0[np.newaxis,:]*self.eigenFT[linesToRemove,:],axis=1)/np.sum(Uk0**2)
+    
+        # Compute the Uks (FTs of wks) to reshape
+        # The Uks are normalized to have unit integral
+        Uk = np.fft.fft(wk, n=nfft, axis=0)
+    
+        # remove mean value for each spectral line
+        j = np.arange(0, nfft)
+       
+        for i, line in enumerate(linesToRemove):
+            background.eigenFT -= B[i]*Uk[j - line,:]
+            lines.eigenFT      += B[i]*Uk[j - line,:]
+        
+#         from IPython.core.debugger import Tracer
+#         Tracer()()
+        background.adaptspec()
+        lines.spec = (np.sum(background.weights**2*np.abs(lines.eigenFT[:nf])**2, axis=1) 
+                        / np.sum(background.weights**2, axis=1)) 
+    
+        # get the line spectrum
+        line_power.spec[linesToRemove] = nfft*np.abs(B)**2
+    
+        # double the power in positive frequencies
+        background.spec[1:-1] *= 2
+        line_power.spec[1:-1] *= 2
+        lines.spec[1:-1] *= 2
+        if np.mod(nfft,2) == 1: # if nfft is odd, double the power at the Nyquist frequency
+            background.spec[-1] *= 2
+            line_power.spec[-1] *= 2
+            lines.spec[-1] *= 2
 
-        lines = asarray(linesToRemove)
+        # resscale to match original variance
+        sscal = np.sum((background.spec + lines.spec)*df)
+        background.spec *= self.xvar/sscal
+        line_power.spec *= self.xvar/sscal
+        lines.spec *= self.xvar/sscal
 
-        if lineWidth is None:
-            width = tile(int(ceil(nw)), lines.shape)
-        else:
-            width = asarray(lineWidth, dtype=int) - 1
-
-        Shat = self.S_noise
-
-        for l0, W in zip(lines, width):
-            l = range(max(l0 - W, 0), min(l0 + W + 1, S.size))
-            Hloc = Hk[:, abs(l - l0)]
-            Hloc[:, l < l0] = conj(Hloc[:, l < l0])
-            Shat[l] = mean(abs(Jk[:, l] - Cl[0, l0] * Hloc) ** 2, axis=0)
-
-        self.removedLines = lines
-        self.fRemovedLines = self.f[lines]
-
+        return background, lines, line_power
+        
     def resetLines(self):
         """
         Clear the removed lines. Reset noise spectrum.
@@ -497,32 +772,42 @@ class MTMSpectrum:
         Gi = linalg.inv(Gamma)
 
         a = sp.sparse.linalg.spsolve(H.astype(complex), G.T * Gi * y)
-        x = real(a * exp(2j * pi * f0 * t))
+        x = np.real(a * exp(2j * pi * f0 * t))
 
         if data is None:
             data = self.data
 
-        rmse = sum((x - data) ** 2)
+        rmse = np.sum((x - data) ** 2)
 
         return a, x, rmse, norm(H0 * ma.asmatrix(a).T), norm(H2 * ma.asmatrix(a).T), norm(H4 * ma.asmatrix(a).T)
 
 
-def medianSmooth(x,width):
-    """
-    Median smoothing without zero padding.
+def medianSmooth(x, width):
+    '''
+    Median smoothing of spectrum without zero padding.
     
     Edges are handled by shrinking the width of the smoother.
-    """
-    w = 2*floor(1+width/2)-1  # ensure width is an odd integer
-    nw = (w-1)/2
+    
+    :param x: :class:`numpy.ndarray`
+        The spectrum to be smoothed
+    :param width: integer
+        Width of the filter (in bins)
+    :param df: float
+        frequency spacing for the spectrum. Defaults to df = 1
+
+    :return y: :class:`numpy.ndarray`
+        Smoothed spectrum
+    '''
 
     N = len(x)
 
-    y = zeros(x.shape)
+#     from IPython.core.debugger import Tracer
+#     Tracer()()
+    y = np.zeros(x.shape)
     for n in range(N):
-        ix0 = max(n-nw,1)
-        ixf = min(n+nw,N)
+        ix0 = max(n-width,0)
+        ixf = min(n+width,N)
 
-        y[n] = median(x[ix0:ixf])
+        y[n] = np.median(x[ix0:ixf])
 
     return y
