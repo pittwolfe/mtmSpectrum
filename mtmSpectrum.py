@@ -57,6 +57,7 @@ class MTMSpectrum(object):
             self.dpss_concentration = obj.dpss_concentration
             self.spec               = obj.spec
             self.edof               = obj.edof
+            self.dof                = obj.dof
             self.eigenFT            = obj.eigenFT
             self.weights            = obj.weights
         else:
@@ -284,7 +285,7 @@ class MTMSpectrum(object):
         bk_dofs = bk/(np.sqrt(np.mean(bk**2, axis=1)))[:,np.newaxis]
         bk_dofs[bk_dofs > 1] = 1
     
-        nu = 2*np.sum(bk_dofs**2, axis=1)
+        nu = self.dof*np.sum(bk_dofs**2, axis=1)
     
         self.spec = spec
         self.edof = nu
