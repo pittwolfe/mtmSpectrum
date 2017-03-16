@@ -245,46 +245,48 @@ class MTMSpectrum(object):
         kspec = self.number_of_tapers
         ne    = self.Nfreq
         Nfreq = self.Nfreq
-        df    = self.df
+#         df    = self.df
     
-        sk = self.dof[:,np.newaxis]*np.abs(self.eigenFT[:Nfreq,:])**2
+#         nfft, kspec = yk.shape
+#         ne = int(nfft/2 + 1)    
     
-        dvar = np.mean(np.sum(sk,axis=0)*df)        
-        Bk = ((1 - mu) * dvar)[np.newaxis,:]
+        df = 0.5/(ne - 1) # assume unit sampling
+        sk = np.abs(yk[:ne,:])**2
+    
+        varsk = df*(sk[0,:] + np.sum(sk[1:-1,:], axis=0) + sk[-1,:])
+        dvar = np.mean(varsk)
         
-        sqev = np.sqrt(mu)[np.newaxis,:]
+        Bk = (1 - mu) * dvar
+        sqev = np.sqrt(mu)
     
         cerr = 1 # current error
-#         rerr = 9.5e-7 # a magical mystery number
-        rerr = adaptTol
+        rerr = 9.5e-7 # a magical mystery number
     
         # begin iterations
         j = 0
-        spec = np.mean(sk[:,:2], axis=1, keepdims=True)
+        spec = (sk[:,0] + sk[:,1])/2
     
         while cerr > rerr:
             j += 1
             slast = spec
         
-            bk = sqev*spec/(mu[np.newaxis,:]*spec + Bk)
+            bk = sqev[np.newaxis,:]*spec[:,np.newaxis]/(mu[np.newaxis,:]*spec[:,np.newaxis] + Bk[np.newaxis,:])
             bk[bk > 1] = 1
         
-            spec = np.sum(bk**2*sk, axis=1, keepdims=True)/np.sum(bk**2, axis=1, keepdims=True)
+            spec = np.sum(bk**2*sk, axis=1)/np.sum(bk**2, axis=1)
         
-            if j >= adaptMaxIts:
+            if j >= 1000:
                 warnings.warn('adaptive iteration did not converge')
                 break
             
             cerr = np.amax(np.abs((spec - slast)/(spec + slast)))
         
-#         from IPython.core.debugger import Tracer
-#         Tracer()()
-        bk_dofs = bk/(np.sqrt(np.mean(bk**2, axis=1, keepdims=True)))
+        bk_dofs = bk/(np.sqrt(np.mean(bk**2, axis=1)))[:,np.newaxis]
         bk_dofs[bk_dofs > 1] = 1
     
-        nu = self.dof*np.sum(bk_dofs**2, axis=1)
+        nu = 2*np.sum(bk_dofs**2, axis=1)
     
-        self.spec = spec.squeeze()
+        self.spec = spec
         self.edof = nu
         self.weights = bk    
     
