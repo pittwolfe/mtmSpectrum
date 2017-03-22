@@ -619,13 +619,9 @@ class MTMSpectrum(object):
         line_power.spec[linesToRemove] = nfft*np.abs(B)**2
     
         # double the power in positive frequencies
-        background.spec[1:-1] *= 2
-        line_power.spec[1:-1] *= 2
-        lines.spec[1:-1] *= 2
-        if np.mod(nfft,2) == 1: # if nfft is odd, double the power at the Nyquist frequency
-            background.spec[-1] *= 2
-            line_power.spec[-1] *= 2
-            lines.spec[-1] *= 2
+        background.spec *= self.dof
+        line_power.spec *= self.dof
+        lines.spec      *= self.dof
 
         # resscale to match original variance
         sscal = np.sum((background.spec + lines.spec)*df)
