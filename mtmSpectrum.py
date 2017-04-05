@@ -60,8 +60,11 @@ class MTMSpectrum(object):
             self.dof                = obj.dof
             self.eigenFT            = obj.eigenFT
             self.weights            = obj.weights
+            self.confidenceValue    = obj.confidenceValue
         else:
                     
+            self.confidenceValue = None
+            
             self.data = data.squeeze()
             self.xvar = data.var(ddof=1) # variance of original data
         
@@ -399,6 +402,7 @@ class MTMSpectrum(object):
         nu = self.edof
         
         conf_int = self.copy()
+        conf_int.confidenceValue = confidenceValue
         conf_int.spec = self.spec*chi2.ppf((1+confidenceValue)/2, nu)/chi2.ppf(.5, nu)
 
         return conf_int
