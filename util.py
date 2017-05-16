@@ -486,3 +486,6 @@ def fftconvolve(in1, in2, mode="full", axis=None):
         return signaltools._centered(ret, osize)
     elif mode == "valid":
         return signaltools._centered(ret, abs(s2 - s1) + 1)
+
+def flatten(tupleOfTuples):
+    return [element for tupl in tupleOfTuples for element in tupl]

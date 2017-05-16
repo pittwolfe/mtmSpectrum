@@ -10,6 +10,7 @@ __author__ = 'cwolfe'
 import numpy as np
 import numpy.matrixlib as ma
 import scipy as sp
+from .util import flatten
 
 class MTMSpectrum(object):
     """
@@ -19,7 +20,8 @@ class MTMSpectrum(object):
     Attributes
     ----------
     data : array_like
-        Input time series
+        Input time series. If multidimensional, the first axis is assumed to be the time axis.
+        Note that adaptive weighing is only supported for 1D arrays.
     
     Parameters
     ----------
@@ -30,9 +32,11 @@ class MTMSpectrum(object):
     """
     
     def __init__(self, data, time_bandwidth=None, t0=0, dt=None, fs=None, number_of_tapers=None, 
-                 nfft=None, adaptTol=None, adaptMaxIts=1000, useEffectiveDOF=True, calcSpectrum=True):
+                 nfft=None, adaptive=True, adaptTol=None, adaptMaxIts=1000, useEffectiveDOF=True, 
+                 calcSpectrum=True):
 
         from .util import dpss
+        from IPython.core.debugger import Tracer
         
         if isinstance(data, MTMSpectrum):
             obj = data
@@ -45,6 +49,7 @@ class MTMSpectrum(object):
             self.fs                 = obj.fs
             self.dt                 = obj.dt
             self.N                  = obj.N
+            self.shape              = obj.shape
             self.nfft               = obj.nfft
             self.adaptTol           = obj.adaptTol
             self.adaptMaxIts        = obj.adaptMaxIts
@@ -62,11 +67,10 @@ class MTMSpectrum(object):
             self.weights            = obj.weights
             self.confidenceValue    = obj.confidenceValue
         else:
-                    
             self.confidenceValue = None
             
             self.data = data.squeeze()
-            self.xvar = data.var(ddof=1) # variance of original data
+            self.xvar = data.var(ddof=0, axis=0) # variance of original data
         
             self.time_bandwidth = time_bandwidth
             self.useEffectiveDOF = useEffectiveDOF
@@ -91,7 +95,8 @@ class MTMSpectrum(object):
                     raise ValueError("Can't specify both fs and dt")
                 
                 
-            self.N = self.data.size
+            self.N = self.data.shape[0]
+            self.shape = self.data.shape[1:]
 
             if nfft is None:
                 self.nfft = int(2 ** (np.ceil(np.log2(self.N))))  # next power of two
@@ -114,16 +119,16 @@ class MTMSpectrum(object):
             self.freq  = np.arange(0, self.Nfreq)*self.df
             
             # DOF in the raw spectra
-            self.dof = np.ones(self.Nfreq)
+            self.dof = np.ones((self.Nfreq,) + self.shape)
             if np.mod(self.nfft, 2) == 0:
-                self.dof[1:-1] = 2
+                self.dof[1:-1,...] = 2
             else:
-                self.dof[1:] = 2
+                self.dof[1:,...] = 2
         
             dpss, self.dpss_concentration = dpss(self.N, self.time_bandwidth, self.number_of_tapers)
             self.dpss = dpss.T
         
-            self.calcSpectrum(self.adaptTol, self.adaptMaxIts)
+            self.calcSpectrum(adaptive, self.adaptTol, self.adaptMaxIts)
             
     def copy(self):
         """ return a shallow copy of self """
@@ -132,7 +137,7 @@ class MTMSpectrum(object):
         return result
         
 
-    def calcSpectrum(self, tol=None, MaxIts=None):
+    def calcSpectrum(self, adaptive, tol=None, MaxIts=None):
         """ 
         Calculate the spectrum.
         
@@ -192,12 +197,19 @@ class MTMSpectrum(object):
         mu   = self.dpss_concentration
         df   = self.df
         
+#         Tracer()()
         self.eigenFT = np.fft.fft(x[:,np.newaxis]*wk, n=nfft, axis=0)  # eigen-FTs
         sk = np.abs(self.eigenFT[:nf,:])**2 # eigenspectra
         sbar = 2*np.mean(sk/mu[np.newaxis,:],axis=1) # mean spectrum
     
-        self.adaptspec(self.adaptTol, self.adaptMaxIts)
-
+        if adaptive:
+            self.adaptspec(self.adaptTol, self.adaptMaxIts)
+        else:
+            self.weights = np.sqrt(mu[np.newaxis,:])
+            self.spec = np.sum(self.weights**2*sk, axis=1)/np.sum(self.weights**2, axis=1)
+            self.edof = self.number_of_tapers*self.eof
+            
+            
         # double the power in positive frequencies
         self.spec *= self.dof
     
@@ -373,11 +385,20 @@ class MTMSpectrum(object):
         """ Get a fit to an AR(1) spectrum """
         
         from scipy.optimize import curve_fit
-                
+        
+#         from IPython.core.debugger import Tracer
+#         Tracer()()
+        
         if fitRange is None:
             idx = self.freq <= self.fn
         else:
-            idx = np.logical_and(self.freq >= fitRange[0], self.freq <= fitRange[1])
+            if '__iter__' not in dir(fitRange[0]):
+                fitRange = (fitRange, )
+                
+            idx = np.full_like(self.freq, False, dtype=bool)
+            for interval in fitRange:
+                idx = np.logical_or(idx, np.logical_and(self.freq >= interval[0], self.freq <= interval[1]))
+        
         
         # fit an AR(1) process to it
         popt, _ = curve_fit(lambda f, r, S0: S0*self.ar1_spec(f, r), 
