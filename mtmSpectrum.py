@@ -126,9 +126,9 @@ class MTMSpectrum(object):
             # DOF in the raw spectra
             self.dof = np.ones(self.Nfreq)
             if np.mod(self.nfft, 2) == 0:
-                self.dof[1:-1,...] = 2
+                self.dof[1:-1] = 2
             else:
-                self.dof[1:,...] = 2
+                self.dof[1:] = 2
         
             dpss, self.dpss_concentration = dpss(self.N, self.time_bandwidth, self.number_of_tapers)
             self.dpss = dpss
