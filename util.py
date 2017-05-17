@@ -133,7 +133,7 @@ def dpss(N, NW, Kmax, interp_from=None, interp_kind='linear'):
 
     # Now find the eigenvalues of the original spectral concentration problem
     # Use the autocorr sequence technique from Percival and Walden, 1993 pg 390
-    dpss_rxx = autocorr(dpss) * N
+    dpss_rxx = crosscov(dpss, dpss, debias=False) * N
     r = 4 * W * np.sinc(2 * W * nidx)
     r[0] = 2 * W
     eigvals = np.dot(dpss_rxx, r)
@@ -255,92 +255,6 @@ def autocorr(x, **kwargs):
     # but without subtracting the mean
     kwargs['debias'] = False
     return autocov(x, **kwargs)
-
-def autocov_vector(x, nlags=None):
-    """
-    This method computes the following function
-
-    .. math::
-
-    R_{xx}(k) = E{ x(t)x^{*}(t-k) } = E{ x(t+k)x^{*}(t) }
-    k \in {0, 1, ..., nlags-1}
-
-    (* := conjugate transpose)
-
-    Note: this is related to
-    the other commonly used definition for vector autocovariance
-
-    .. math::
-
-    R_{xx}^{(2)}(k) = E{ x(t-k)x^{*}(t) } = R_{xx}(-k) = R_{xx}^{*}(k)
-
-    Parameters
-    ----------
-
-    x : ndarray (nc, N)
-
-    nlags : int, optional
-       compute lags for k in {0, ..., nlags-1}
-
-    Returns
-    -------
-
-    rxx : ndarray (nc, nc, nlags)
-
-    """
-    return crosscov_vector(x, x, nlags=nlags)
-
-def crosscov_vector(x, y, nlags=None):
-    """
-    This method computes the following function
-
-    .. math::
-
-        R_{xy}(k) = E{ x(t)y^{*}(t-k) } = E{ x(t+k)y^{*}(t) }
-        k \in {0, 1, ..., nlags-1}
-
-    (* := conjugate transpose)
-
-    Note: This is related to the other commonly used definition
-    for vector crosscovariance
-
-    .. math::
-
-        R_{xy}^{(2)}(k) = E{ x(t-k)y^{*}(t) } = R_{xy}^(-k) = R_{yx}^{*}(k)
-
-    Parameters
-    ----------
-
-    x, y : ndarray (nc, N)
-
-    nlags : int, optional
-       compute lags for k in {0, ..., nlags-1}
-
-    Returns
-    -------
-
-    rxy : ndarray (nc, nc, nlags)
-
-    """
-    N = x.shape[1]
-    if nlags is None:
-        nlags = N
-    nc = x.shape[0]
-
-    rxy = np.empty((nc, nc, nlags))
-
-    # rxy(k) = E{ x(t)y*(t-k) } ( * = conj transpose )
-    # Take the expectation over an outer-product
-    # between x(t) and conj{y(t-k)} for each t
-
-    for k in range(nlags):
-        # rxy(k) = E{ x(t)y*(t-k) }
-        prod = x[:, None, k:] * y[None, :, :N - k].conj()
-##         # rxy(k) = E{ x(t)y*(t+k) }
-##         prod = x[:,None,:N-k] * y[None,:,k:].conj()
-        # Do a sample mean of N-k pts? or sum and divide by N?
-        rxy[..., k] = prod.mean(axis=-1)
-    return rxy
 
 def autocov(x, **kwargs):
     """Returns the autocovariance of signal s at all lags.
@@ -487,5 +401,5 @@ def fftconvolve(in1, in2, mode="full", axis=None):
     elif mode == "valid":
         return signaltools._centered(ret, abs(s2 - s1) + 1)
 
-def flatten(tupleOfTuples):
+def flatten_tuples(tupleOfTuples):
     return [element for tupl in tupleOfTuples for element in tupl]
