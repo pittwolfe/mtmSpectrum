@@ -8,9 +8,10 @@
 __author__ = 'cwolfe'
 
 import numpy as np
-import numpy.matrixlib as ma
+import numpy.ma as ma 
 import scipy as sp
-from .util import flatten
+import warnings
+from .util import flatten_tuples
 
 class MTMSpectrum(object):
     """
@@ -20,8 +21,10 @@ class MTMSpectrum(object):
     Attributes
     ----------
     data : array_like
-        Input time series. If multidimensional, the first axis is assumed to be the time axis.
-        Note that adaptive weighing is only supported for 1D arrays.
+        Input time series. If multidimensional, the last axis is assumed to be the time axis.
+        
+        If data is a masked array, the non-temporal parts of the mask are propagated through
+        the calculation.
     
     Parameters
     ----------
@@ -34,6 +37,8 @@ class MTMSpectrum(object):
     def __init__(self, data, time_bandwidth=None, t0=0, dt=None, fs=None, number_of_tapers=None, 
                  nfft=None, adaptive=True, adaptTol=None, adaptMaxIts=1000, useEffectiveDOF=True, 
                  calcSpectrum=True):
+        """
+        """
 
         from .util import dpss
         from IPython.core.debugger import Tracer
@@ -70,7 +75,7 @@ class MTMSpectrum(object):
             self.confidenceValue = None
             
             self.data = data.squeeze()
-            self.xvar = data.var(ddof=0, axis=0) # variance of original data
+            self.xvar = data.var(ddof=0, axis=-1, keepdims=True) # variance of original data
         
             self.time_bandwidth = time_bandwidth
             self.useEffectiveDOF = useEffectiveDOF
@@ -95,8 +100,8 @@ class MTMSpectrum(object):
                     raise ValueError("Can't specify both fs and dt")
                 
                 
-            self.N = self.data.shape[0]
-            self.shape = self.data.shape[1:]
+            self.N = self.data.shape[-1]
+            self.shape = self.data.shape[:-1]
 
             if nfft is None:
                 self.nfft = int(2 ** (np.ceil(np.log2(self.N))))  # next power of two
@@ -105,7 +110,7 @@ class MTMSpectrum(object):
                 self.nfft = nfft
             
             if adaptTol is None: 
-                self.adaptTol = 0.005 * self.xvar / self.nfft
+                self.adaptTol = 0.005 * (self.xvar / self.nfft).min()
             else:
                 self.adaptTol = adaptTol
             self.adaptMaxIts = adaptMaxIts
@@ -119,14 +124,14 @@ class MTMSpectrum(object):
             self.freq  = np.arange(0, self.Nfreq)*self.df
             
             # DOF in the raw spectra
-            self.dof = np.ones((self.Nfreq,) + self.shape)
+            self.dof = np.ones(self.Nfreq)
             if np.mod(self.nfft, 2) == 0:
                 self.dof[1:-1,...] = 2
             else:
                 self.dof[1:,...] = 2
         
             dpss, self.dpss_concentration = dpss(self.N, self.time_bandwidth, self.number_of_tapers)
-            self.dpss = dpss.T
+            self.dpss = dpss
         
             self.calcSpectrum(adaptive, self.adaptTol, self.adaptMaxIts)
             
@@ -197,24 +202,34 @@ class MTMSpectrum(object):
         mu   = self.dpss_concentration
         df   = self.df
         
+#         from IPython.core.debugger import Tracer
 #         Tracer()()
-        self.eigenFT = np.fft.fft(x[:,np.newaxis]*wk, n=nfft, axis=0)  # eigen-FTs
-        sk = np.abs(self.eigenFT[:nf,:])**2 # eigenspectra
-        sbar = 2*np.mean(sk/mu[np.newaxis,:],axis=1) # mean spectrum
+
+        # this causes more trouble than it solves
+        # eigen-FTs
+#         if isinstance(x, ma.MaskedArray):
+#             self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1).view(ma.MaskedArray)
+#             self.eigenFT[x.mask[...,0],:] = ma.masked
+#         else:
+#             self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1)
+        self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1)
+            
+        sk = np.abs(self.eigenFT[...,:nf])**2 # eigenspectra
+        sbar = self.dof*np.mean(sk/mu[:,np.newaxis],axis=-2) # mean spectrum
     
         if adaptive:
             self.adaptspec(self.adaptTol, self.adaptMaxIts)
         else:
-            self.weights = np.sqrt(mu[np.newaxis,:])
-            self.spec = np.sum(self.weights**2*sk, axis=1)/np.sum(self.weights**2, axis=1)
-            self.edof = self.number_of_tapers*self.eof
+            self.weights = np.sqrt(mu[:,np.newaxis])
+            self.spec = np.sum(self.weights**2*sk, axis=-2)/np.sum(self.weights**2, axis=-2)
+            self.edof = self.number_of_tapers*self.dof
             
             
         # double the power in positive frequencies
         self.spec *= self.dof
     
         # resscale to match original variance
-        sscal = np.sum(self.spec*df)
+        sscal = np.sum(self.spec*df, axis=-1, keepdims=True)
         self.spec *= self.xvar/sscal
         
 
@@ -255,56 +270,71 @@ class MTMSpectrum(object):
         if adaptMaxIts is None:
             adaptMaxIts = self.adaptMaxIts
 
-        mu    = self.dpss_concentration
+        mu    = self.dpss_concentration[:,np.newaxis]
         yk    = self.eigenFT
         nfft  = self.nfft
         kspec = self.number_of_tapers
         ne    = self.Nfreq
         Nfreq = self.Nfreq
-#         df    = self.df
-    
-#         nfft, kspec = yk.shape
-#         ne = int(nfft/2 + 1)    
-    
+        dof   = self.dof
+
+        Ndata = int(np.prod(self.shape))
+
         df = 0.5/(ne - 1) # assume unit sampling
-        sk = np.abs(yk[:ne,:])**2
-    
-        varsk = df*(sk[0,:] + np.sum(sk[1:-1,:], axis=0) + sk[-1,:])
-        dvar = np.mean(varsk)
-        
-        Bk = (1 - mu) * dvar
+
+        # semi-flatten for convenience
+        sk = np.reshape(np.abs(yk[...,:ne])**2, (Ndata, kspec, Nfreq))
+
+        varsk = df*np.sum(dof[np.newaxis,:]*sk, axis=-1)
+        dvar = np.mean(varsk, axis=-1)
+
+        Bk = (1 - mu) * dvar[:,np.newaxis,np.newaxis]
         sqev = np.sqrt(mu)
-    
-        cerr = 1 # current error
-        rerr = 9.5e-7 # a magical mystery number
-    
+
+        active = np.ravel(self.xvar > 0)
+
         # begin iterations
-        j = 0
-        spec = (sk[:,0] + sk[:,1])/2
-    
-        while cerr > rerr:
-            j += 1
-            slast = spec
-        
-            bk = sqev[np.newaxis,:]*spec[:,np.newaxis]/(mu[np.newaxis,:]*spec[:,np.newaxis] + Bk[np.newaxis,:])
-            bk[bk > 1] = 1
-        
-            spec = np.sum(bk**2*sk, axis=1)/np.sum(bk**2, axis=1)
-        
-            if j >= 1000:
+        j = np.zeros(Ndata)
+        spec = ((sk[:,0,:] + sk[:,1,:])/2)[:,np.newaxis,:]
+        slast = spec.copy()
+        bk = np.zeros_like(sk)
+
+        # current error
+        # cerr = np.ones(Ndata)
+
+        while any(active):
+            j[active] += 1
+            slast[active,:,:] = spec[active,:,:]
+
+            bk[active,:,:] = np.fmin(sqev*spec[active,:,:] / (mu*spec[active,:,:] + Bk[active,:,:]),1)
+
+            spec[active,:,:] = (np.sum(bk[active,:,:]**2*sk[active,:,:], axis=-2, keepdims=True) 
+                                / np.sum(bk[active,:,:]**2, axis=-2, keepdims=True))
+
+            if any(j > adaptMaxIts):
                 warnings.warn('adaptive iteration did not converge')
                 break
-            
-            cerr = np.amax(np.abs((spec - slast)/(spec + slast)))
-        
-        bk_dofs = bk/(np.sqrt(np.mean(bk**2, axis=1)))[:,np.newaxis]
+
+            cerr = np.amax(np.abs((spec[active,:,:] - slast[active,:,:]) 
+                                 /(spec[active,:,:] + slast[active,:,:])), axis=-1).squeeze()
+    
+            active[active] = cerr > adaptTol
+
+
+        recip_bk = np.sqrt(np.mean(bk**2, axis=-2, keepdims=True))
+        recip_bk[recip_bk > 0] = 1/recip_bk[recip_bk > 0]
+
+        bk_dofs = recip_bk*bk
         bk_dofs[bk_dofs > 1] = 1
-    
-        nu = self.dof*np.sum(bk_dofs**2, axis=1)
-    
-        self.spec = spec
-        self.edof = nu
-        self.weights = bk    
+
+        nu = self.dof*np.sum(bk_dofs**2, axis=-2)
+
+        # unsemi-flatten
+        self.spec    = np.reshape(spec, flatten_tuples((self.shape, (Nfreq,))))
+        self.edof    = np.reshape(nu,   flatten_tuples((self.shape, (Nfreq,))))
+        self.weights = np.reshape(bk,   flatten_tuples((self.shape, (kspec, Nfreq,))))
+
+        self.adaptiveIterations = np.reshape(j, self.shape)
     
     def ar1_spec(self, f, r):
         r"""
@@ -376,7 +406,7 @@ class MTMSpectrum(object):
         # find the width in terms of bins, ensuring it is an odd integer
         w = 2*int((smoothingWidth/df)//2) + 1
         width = (w-1)//2
-        spec_smooth.spec[idx] = medianSmooth(self.spec[idx], width)
+        spec_smooth.spec[...,idx] = medianSmooth(self.spec[...,idx], width)
         
         return spec_smooth
         
@@ -388,6 +418,9 @@ class MTMSpectrum(object):
         
 #         from IPython.core.debugger import Tracer
 #         Tracer()()
+        
+        if len(self.shape) > 0:
+            raise RuntimeError('getFit only implemented for 1D data')
         
         if fitRange is None:
             idx = self.freq <= self.fn
@@ -721,6 +754,8 @@ class MTMSpectrum(object):
         where :math:`\mathbf{y}` is a vector of the :math:`J_k(f_0)\text{s}`.         
         """
         from numpy.linalg import norm
+        import numpy.matrixlib as ma
+        
     #    import ipdb; ipdb.set_trace()
 
         f0 = self.f[line]
@@ -812,6 +847,8 @@ def medianSmooth(x, width):
     
     Edges are handled by shrinking the width of the smoother.
     
+    If x is multidimensional, the smooth is applied along the last axis.
+    
     :param x: :class:`numpy.ndarray`
         The spectrum to be smoothed
     :param width: integer
@@ -823,15 +860,15 @@ def medianSmooth(x, width):
         Smoothed spectrum
     '''
 
-    N = len(x)
+    N = x.shape[-1]
 
 #     from IPython.core.debugger import Tracer
 #     Tracer()()
-    y = np.zeros(x.shape)
+    y = np.zeros_like(x)
     for n in range(N):
         ix0 = max(n-width,0)
         ixf = min(n+width,N)
 
-        y[n] = np.median(x[ix0:ixf])
+        y[...,n] = np.median(x[...,ix0:ixf], axis=-1)
 
     return y
