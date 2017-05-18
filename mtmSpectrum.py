@@ -23,9 +23,6 @@ class MTMSpectrum(object):
     data : array_like
         Input time series. If multidimensional, the last axis is assumed to be the time axis.
         
-        If data is a masked array, the non-temporal parts of the mask are propagated through
-        the calculation.
-    
     Parameters
     ----------
     nw : int
@@ -47,6 +44,7 @@ class MTMSpectrum(object):
             obj = data
             
             self.data               = obj.data
+            self.mask               = obj.mask
             self.xvar               = obj.xvar
             self.time_bandwidth     = obj.time_bandwidth
             self.number_of_tapers   = obj.number_of_tapers
@@ -75,6 +73,11 @@ class MTMSpectrum(object):
             self.confidenceValue = None
             
             self.data = data.squeeze()
+            if isinstance(self.data, ma.MaskedArray):
+                self.mask = self.data.mask[...,0]
+            else:
+                self.mask = None
+                
             self.xvar = data.var(ddof=0, axis=-1, keepdims=True) # variance of original data
         
             self.time_bandwidth = time_bandwidth
@@ -110,7 +113,7 @@ class MTMSpectrum(object):
                 self.nfft = nfft
             
             if adaptTol is None: 
-                self.adaptTol = 0.005 * (self.xvar / self.nfft).min()
+                self.adaptTol = 0.005 * self.xvar / self.nfft
             else:
                 self.adaptTol = adaptTol
             self.adaptMaxIts = adaptMaxIts
@@ -205,14 +208,12 @@ class MTMSpectrum(object):
 #         from IPython.core.debugger import Tracer
 #         Tracer()()
 
-        # this causes more trouble than it solves
         # eigen-FTs
-#         if isinstance(x, ma.MaskedArray):
-#             self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1).view(ma.MaskedArray)
-#             self.eigenFT[x.mask[...,0],:] = ma.masked
-#         else:
-#             self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1)
         self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1)
+        if self.mask is not None:
+            self.eigenFT = self.eigenFT.view(ma.MaskedArray)
+            self.eigenFT[self.mask,:] = ma.masked
+#         self.eigenFT = np.fft.fft(x[...,np.newaxis,:]*wk, n=nfft, axis=-1)
             
         sk = np.abs(self.eigenFT[...,:nf])**2 # eigenspectra
         sbar = self.dof*np.mean(sk/mu[:,np.newaxis],axis=-2) # mean spectrum
@@ -271,7 +272,7 @@ class MTMSpectrum(object):
             adaptMaxIts = self.adaptMaxIts
 
         mu    = self.dpss_concentration[:,np.newaxis]
-        yk    = self.eigenFT
+        yk    = np.array(self.eigenFT) # remove mask if it has one
         nfft  = self.nfft
         kspec = self.number_of_tapers
         ne    = self.Nfreq
@@ -330,9 +331,23 @@ class MTMSpectrum(object):
         nu = self.dof*np.sum(bk_dofs**2, axis=-2)
 
         # unsemi-flatten
-        self.spec    = np.reshape(spec, flatten_tuples((self.shape, (Nfreq,))))
-        self.edof    = np.reshape(nu,   flatten_tuples((self.shape, (Nfreq,))))
-        self.weights = np.reshape(bk,   flatten_tuples((self.shape, (kspec, Nfreq,))))
+        spec    = np.reshape(spec, flatten_tuples((self.shape, (Nfreq,))))
+        edof    = np.reshape(nu,   flatten_tuples((self.shape, (Nfreq,))))
+        weights = np.reshape(bk,   flatten_tuples((self.shape, (kspec, Nfreq,))))
+
+        # mask
+        if self.mask is None:
+            self.spec = spec
+            self.edof = edof
+            self.weights = weights
+        else:
+            self.spec = spec.view(ma.MaskedArray)
+            self.edof = edof.view(ma.MaskedArray)
+            self.weights = weights.view(ma.MaskedArray)
+            
+            self.spec[self.mask,:] = ma.masked
+            self.edof[self.mask,:] = ma.masked
+            self.weights[self.mask,:,:] = ma.masked
 
         self.adaptiveIterations = np.reshape(j, self.shape)
     
