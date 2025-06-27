@@ -1,8 +1,8 @@
 """
     util
     -----------
-    A collection of utilities used to calculate the discrete prolated spherical sequences (DPSSs). 
-    
+    A collection of utilities used to calculate the discrete prolated spherical sequences (DPSSs).
+
     Taken from the package "nitime" version 0.5 (http://nipy.org/nitime/)
 """
 
@@ -10,7 +10,7 @@ import numpy as np
 import scipy as sp
 import scipy.linalg as linalg
 import scipy.fftpack as fftpack
-    
+
 
 def dpss(N, NW, Kmax, interp_from=None, interp_kind='linear'):
     """
@@ -361,8 +361,8 @@ def fftconvolve(in1, in2, mode="full", axis=None):
     """
     s1 = np.array(in1.shape)
     s2 = np.array(in2.shape)
-    complex_result = (np.issubdtype(in1.dtype, np.complex) or
-                      np.issubdtype(in2.dtype, np.complex))
+    complex_result = (np.issubdtype(in1.dtype, np.complex128) or
+                      np.issubdtype(in2.dtype, np.complex128))
 
     if axis is None:
         size = s1 + s2 - 1
